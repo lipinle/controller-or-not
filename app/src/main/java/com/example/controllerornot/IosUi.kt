@@ -315,6 +315,24 @@ class IosSheet(private val activity: Activity, title: String, private val tall: 
         return r
     }
 
+    /** Row whose detail text is re-read twice a second while the sheet is open (for live statistics). */
+    fun liveRow(title: String, text: () -> String): View {
+        val r = rowBase()
+        r.addView(label(title), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val detail = label(text(), Ios.SECONDARY).apply { textSize = 15f }
+        r.addView(detail)
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        val tick = object : Runnable {
+            override fun run() {
+                if (!dialog.isShowing) return
+                detail.text = text()
+                handler.postDelayed(this, 500)
+            }
+        }
+        handler.postDelayed(tick, 500)
+        return r
+    }
+
     fun action(text: String, color: Int, onClick: () -> Unit): View {
         val r = rowBase()
         r.gravity = Gravity.CENTER

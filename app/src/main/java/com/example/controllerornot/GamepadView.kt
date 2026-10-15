@@ -1,6 +1,7 @@
 package com.example.controllerornot
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.DashPathEffect
 import android.graphics.Paint
@@ -34,6 +35,12 @@ class GamepadView(context: Context) : View(context) {
     var opacity = 0.95f
         set(v) { field = v.coerceIn(0.2f, 1f); invalidate() }
     var haptics = true
+
+    /** Optional wallpaper (centre-cropped) drawn under the controls, darkened by [bgDim]. */
+    var backgroundBitmap: Bitmap? = null
+        set(v) { field = v; invalidate() }
+    var bgDim = 0.35f
+        set(v) { field = v.coerceIn(0f, 0.9f); invalidate() }
     var gyroActive = false
         set(v) { field = v; invalidate() }
     var editMode = false
@@ -86,6 +93,9 @@ class GamepadView(context: Context) : View(context) {
         typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
     }
     private val rect = RectF()
+    private val srcRect = Rect()
+    private val dstRect = Rect()
+    private val bgPaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val path = Path()
     private val path2 = Path()
 
@@ -186,12 +196,33 @@ class GamepadView(context: Context) : View(context) {
     // ---------------------------------------------------------------------------------------------
 
     override fun onDraw(c: Canvas) {
-        c.drawColor(BG)
+        drawBackground(c)
         val layer = c.saveLayerAlpha(0f, 0f, width.toFloat(), height.toFloat(), (opacity * 255).toInt())
         for (s in specsList) if (s.isZone) drawControl(c, s)
         for (s in specsList) if (!s.isZone) drawControl(c, s)
         c.restoreToCount(layer)
         if (editMode) drawEditOverlay(c)
+    }
+
+    private fun drawBackground(c: Canvas) {
+        val bmp = backgroundBitmap
+        if (bmp == null || bmp.isRecycled || width == 0 || height == 0) {
+            c.drawColor(BG)
+            return
+        }
+        // centre-crop: take the largest source area with the view's aspect ratio
+        val viewAspect = width.toFloat() / height
+        val bmpAspect = bmp.width.toFloat() / bmp.height
+        if (bmpAspect > viewAspect) {
+            val w = (bmp.height * viewAspect).toInt()
+            srcRect.set((bmp.width - w) / 2, 0, (bmp.width + w) / 2, bmp.height)
+        } else {
+            val h = (bmp.width / viewAspect).toInt()
+            srcRect.set(0, (bmp.height - h) / 2, bmp.width, (bmp.height + h) / 2)
+        }
+        dstRect.set(0, 0, width, height)
+        c.drawBitmap(bmp, srcRect, dstRect, bgPaint)
+        c.drawColor(((bgDim * 255).toInt() shl 24))
     }
 
     private fun drawControl(c: Canvas, s: ControlSpec) {
@@ -462,6 +493,8 @@ class GamepadView(context: Context) : View(context) {
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
         if (!loaded) return true
+        // deliver touches at the panel's sampling rate instead of batching them per frame
+        if (e.actionMasked == MotionEvent.ACTION_DOWN) requestUnbufferedDispatch(e)
         if (editMode) handleEdit(e) else handlePlay(e)
         return true
     }

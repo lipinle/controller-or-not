@@ -3,6 +3,7 @@ package com.example.controllerornot
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattCharacteristic.PERMISSION_READ_ENCRYPTED
 import android.bluetooth.BluetoothGattCharacteristic.PERMISSION_WRITE_ENCRYPTED
@@ -16,6 +17,7 @@ import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
@@ -23,11 +25,18 @@ import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.Context
 import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.os.ParcelUuid
+import android.os.Process
 import android.os.SystemClock
 import java.util.ArrayDeque
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+
+/** Rolling send statistics: [avgMs] = mean time from input to radio hand-off, [perSecond] = reports sent last second. */
+class LinkStats(val avgMs: Float, val maxMs: Float, val perSecond: Int)
 
 /** Connection stage, used by the UI to colour the status indicator. */
 enum class Link { STOPPED, ADVERTISING, CONNECTED, READY, ERROR }
@@ -60,14 +69,44 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
     private var running = false
 
     private val pendingServices = ArrayDeque<BluetoothGattService>()
-    private val connected = LinkedHashSet<BluetoothDevice>()
-    private val subscribed = HashSet<String>()
+    private val connected = LinkedHashSet<BluetoothDevice>()                // main thread only
+    private val subscribed = ConcurrentHashMap<String, BluetoothDevice>()   // devices that enabled notifications
+    private val fastLinks = HashMap<String, BluetoothGatt>()                // main thread only
 
     private var protocolMode: Byte = 1 // report protocol
-    private var latest: ByteArray = ByteArray(HidReport.INPUT_REPORT_SIZE)
-    private var dirty = false
+    @Volatile private var latest: ByteArray = ByteArray(HidReport.INPUT_REPORT_SIZE)
+
+    /**
+     * Latency extras: ask for the 2M PHY and (experimental) open a client link to the host only to request a
+     * short connection interval, since BluetoothGattServer has no such call of its own.
+     */
+    @Volatile
+    var lowLatency = true
+        set(v) {
+            field = v
+            main.post {
+                if (v) subscribed.values.forEach { optimizeLink(it) } else closeAllFastLinks()
+            }
+        }
+
+    // Outgoing report queue, drained by a dedicated high-priority thread. Everything below is guarded by [queue].
+    private class Pending(var data: ByteArray, val queuedAtNs: Long)
+    private val queue = ArrayDeque<Pending>()
     private var notifyBusy = false
     private var notifyStartedAt = 0L
+    private var inFlightQueuedNs = 0L
+    private var failures = 0
+    private var latEmaMs = 0f
+    private var winStartNs = 0L
+    private var winCount = 0
+    private var winMaxMs = 0f
+    private var lastRate = 0
+    private var lastMax = 0f
+
+    private var senderThread: HandlerThread? = null
+    @Volatile private var sender: Handler? = null
+    private val pumpPosted = AtomicBoolean(false)
+    private val pumpTask = Runnable { pumpPosted.set(false); pump() }
 
     val isRunning: Boolean get() = running
 
@@ -89,8 +128,17 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
         this.profile = profile
         advertiser = adv
         running = true
-        notifyBusy = false
-        dirty = false
+        synchronized(queue) {
+            queue.clear()
+            notifyBusy = false
+            failures = 0
+            latEmaMs = 0f; winStartNs = 0L; winCount = 0; winMaxMs = 0f; lastRate = 0; lastMax = 0f
+        }
+        val thread = HandlerThread("hid-send", Process.THREAD_PRIORITY_URGENT_DISPLAY)
+        thread.start()
+        senderThread = thread
+        sender = Handler(thread.looper)
+        pumpPosted.set(false)
 
         if (originalName == null) originalName = adapter.name
         adapter.name = profile.deviceName
@@ -114,9 +162,15 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
         server = null
         advertiser = null
         inputReport = null
+        closeAllFastLinks()
         connected.clear()
         subscribed.clear()
         pendingServices.clear()
+        sender?.removeCallbacksAndMessages(null)
+        sender = null
+        senderThread?.quitSafely()
+        senderThread = null
+        synchronized(queue) { queue.clear(); notifyBusy = false }
         originalName?.let { runCatching { adapter?.name = it } }
         originalName = null
         listener.onStatus(Link.STOPPED, "หยุดอยู่")
@@ -126,48 +180,130 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
     // Sending input
     // ---------------------------------------------------------------------------------------------
 
+    /** Latency statistics of the last second, for the settings screen. */
+    fun stats(): LinkStats = synchronized(queue) { LinkStats(latEmaMs, lastMax, lastRate) }
+
     fun send(state: GamepadState) {
-        synchronized(this) {
-            latest = HidReport.build(state)
-            dirty = true
+        val report = HidReport.build(state)
+        latest = report
+        val now = SystemClock.elapsedRealtimeNanos()
+        synchronized(queue) {
+            val tail = queue.peekLast()
+            if (tail != null && sameDigital(tail.data, report)) {
+                // only analog values moved: newest wins, no point sending the stale one
+                tail.data = report
+            } else {
+                // a button / trigger / hat edge must reach the host even if it is released again right away
+                if (queue.size >= MAX_QUEUE) queue.pollFirst()
+                queue.addLast(Pending(report, now))
+            }
         }
-        pump()
+        schedulePump()
     }
 
+    private fun sameDigital(a: ByteArray, b: ByteArray): Boolean {
+        for (i in DIGITAL_START until HidReport.INPUT_REPORT_SIZE) if (a[i] != b[i]) return false
+        return true
+    }
+
+    private fun schedulePump() {
+        val h = sender ?: return
+        if (pumpPosted.compareAndSet(false, true)) h.post(pumpTask)
+    }
+
+    /** Runs on the sender thread only: sends the next queued report once the previous one has left the phone. */
     private fun pump() {
         val srv = server ?: return
         val chr = inputReport ?: return
-        val report: ByteArray
-        synchronized(this) {
-            if (!dirty) return
-            // Recover if the stack never reported completion of the previous notification.
-            if (notifyBusy && SystemClock.elapsedRealtime() - notifyStartedAt > 100) notifyBusy = false
+        val item: Pending
+        synchronized(queue) {
+            if (queue.isEmpty()) return
+            val now = SystemClock.elapsedRealtime()
+            // recover if the stack never confirmed the previous notification
+            if (notifyBusy && now - notifyStartedAt > BUSY_TIMEOUT_MS) notifyBusy = false
             if (notifyBusy) return
-            report = latest
-            dirty = false
+            item = queue.pollFirst()!!
             notifyBusy = true
-            notifyStartedAt = SystemClock.elapsedRealtime()
+            notifyStartedAt = now
+            inFlightQueuedNs = item.queuedAtNs
         }
-        val targets = connected.filter { it.address in subscribed }
+        val targets = subscribed.values
         if (targets.isEmpty()) {
-            synchronized(this) { notifyBusy = false }
+            synchronized(queue) { notifyBusy = false; queue.clear() }
             return
         }
-        for (device in targets) notify(srv, device, chr, report)
+        var ok = true
+        for (d in targets) if (!notify(srv, d, chr, item.data)) ok = false
+        if (ok) {
+            failures = 0
+        } else {
+            synchronized(queue) {
+                notifyBusy = false
+                if (++failures < MAX_FAILURES) queue.addFirst(item)
+            }
+            sender?.postDelayed({ pump() }, 2)
+        }
     }
 
     @Suppress("DEPRECATION")
-    private fun notify(srv: BluetoothGattServer, device: BluetoothDevice, chr: BluetoothGattCharacteristic, value: ByteArray) {
+    private fun notify(srv: BluetoothGattServer, device: BluetoothDevice, chr: BluetoothGattCharacteristic, value: ByteArray): Boolean =
         try {
             if (Build.VERSION.SDK_INT >= 33) {
-                srv.notifyCharacteristicChanged(device, chr, false, value)
+                srv.notifyCharacteristicChanged(device, chr, false, value) == BluetoothStatusCodes.SUCCESS
             } else {
                 chr.value = value
                 srv.notifyCharacteristicChanged(device, chr, false)
             }
         } catch (e: Exception) {
-            synchronized(this) { notifyBusy = false }
+            false
         }
+
+    // ---------------------------------------------------------------------------------------------
+    // Link optimisation
+    // ---------------------------------------------------------------------------------------------
+
+    private fun optimizeLink(device: BluetoothDevice) {
+        val srv = server ?: return
+        if (Build.VERSION.SDK_INT >= 26) {
+            try {
+                srv.setPreferredPhy(device, BluetoothDevice.PHY_LE_2M_MASK, BluetoothDevice.PHY_LE_2M_MASK, BluetoothDevice.PHY_OPTION_NO_PREFERRED)
+            } catch (e: Exception) {
+                // not supported by this controller
+            }
+        }
+        // iOS ignores the peripheral's preferred parameters, so the short interval has to be requested explicitly.
+        main.postDelayed({ openFastLink(device) }, 1000)
+    }
+
+    private fun openFastLink(device: BluetoothDevice) {
+        if (!running || !lowLatency || !subscribed.containsKey(device.address) || fastLinks.containsKey(device.address)) return
+        try {
+            val g = device.connectGatt(appContext, false, fastLinkCallback, BluetoothDevice.TRANSPORT_LE)
+            if (g != null) fastLinks[device.address] = g
+        } catch (e: Exception) {
+            // best effort only
+        }
+    }
+
+    private val fastLinkCallback = object : BluetoothGattCallback() {
+        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            if (newState != BluetoothProfile.STATE_CONNECTED) return
+            try { gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH) } catch (e: Exception) { }
+            // ask again later: some stacks ignore a request made right after connecting
+            main.postDelayed({
+                try { gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH) } catch (e: Exception) { }
+            }, 4000)
+        }
+    }
+
+    private fun closeFastLink(address: String) {
+        fastLinks.remove(address)?.let {
+            try { it.disconnect(); it.close() } catch (e: Exception) { }
+        }
+    }
+
+    private fun closeAllFastLinks() {
+        fastLinks.keys.toList().forEach { closeFastLink(it) }
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -289,13 +425,14 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
         }
 
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
+            if (newState != BluetoothProfile.STATE_CONNECTED) subscribed.remove(device.address)
             main.post {
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
                     connected.add(device)
                     listener.onStatus(Link.CONNECTED, "เชื่อมต่อกับ ${device.name ?: device.address} แล้ว")
                 } else {
                     connected.remove(device)
-                    subscribed.remove(device.address)
+                    closeFastLink(device.address)
                     if (running) {
                         listener.onStatus(Link.ADVERTISING, "หลุดการเชื่อมต่อ – กำลังประกาศใหม่")
                         startAdvertising()
@@ -311,7 +448,7 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
         ) {
             val full = when (characteristic.uuid) {
                 UUID_PROTOCOL_MODE -> byteArrayOf(protocolMode)
-                UUID_REPORT -> if (characteristic === inputReport) synchronized(this@BleHidGamepad) { latest } else ByteArray(8)
+                UUID_REPORT -> if (characteristic === inputReport) latest else ByteArray(8)
                 else -> characteristic.value ?: ByteArray(0)
             }
             respondRead(device, requestId, offset, full)
@@ -321,7 +458,7 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
             device: BluetoothDevice, requestId: Int, offset: Int, descriptor: BluetoothGattDescriptor,
         ) {
             val full = if (descriptor.uuid == UUID_CCC) {
-                if (device.address in subscribed) BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                if (subscribed.containsKey(device.address)) BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
                 else BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
             } else {
                 descriptor.value ?: ByteArray(0)
@@ -335,12 +472,22 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
         ) {
             if (descriptor.uuid == UUID_CCC && descriptor.characteristic === inputReport) {
                 val enabled = value.isNotEmpty() && (value[0].toInt() and 0x01) != 0
+                if (enabled) subscribed[device.address] = device else subscribed.remove(device.address)
+                if (enabled) {
+                    // give the host the current state straight away
+                    synchronized(queue) {
+                        queue.clear()
+                        queue.addLast(Pending(latest, SystemClock.elapsedRealtimeNanos()))
+                        notifyBusy = false
+                    }
+                    schedulePump()
+                }
                 main.post {
-                    if (enabled) subscribed.add(device.address) else subscribed.remove(device.address)
                     if (enabled) {
                         listener.onStatus(Link.READY, "พร้อมใช้งาน – เครื่องปลายทางรับสัญญาณแล้ว")
-                        synchronized(this@BleHidGamepad) { dirty = true; notifyBusy = false }
-                        pump()
+                        if (lowLatency) optimizeLink(device)
+                    } else {
+                        closeFastLink(device.address)
                     }
                 }
             }
@@ -359,8 +506,19 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
         }
 
         override fun onNotificationSent(device: BluetoothDevice, status: Int) {
-            synchronized(this@BleHidGamepad) { notifyBusy = false }
-            pump()
+            val now = SystemClock.elapsedRealtimeNanos()
+            synchronized(queue) {
+                notifyBusy = false
+                val latMs = (now - inFlightQueuedNs) / 1_000_000f
+                latEmaMs = if (latEmaMs == 0f) latMs else latEmaMs + (latMs - latEmaMs) * 0.1f
+                if (latMs > winMaxMs) winMaxMs = latMs
+                winCount++
+                if (now - winStartNs >= 1_000_000_000L) {
+                    lastRate = winCount; lastMax = winMaxMs
+                    winCount = 0; winMaxMs = 0f; winStartNs = now
+                }
+            }
+            schedulePump()
         }
     }
 
@@ -382,6 +540,11 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
     }
 
     companion object {
+        private const val MAX_QUEUE = 8
+        private const val DIGITAL_START = 8 // bytes 8.. of the input report: triggers, hat, buttons, share
+        private const val BUSY_TIMEOUT_MS = 100L
+        private const val MAX_FAILURES = 50
+
         private fun uuid16(short: Int) = UUID.fromString(String.format("%08x-0000-1000-8000-00805f9b34fb", short))
 
         val UUID_DIS = uuid16(0x180A)

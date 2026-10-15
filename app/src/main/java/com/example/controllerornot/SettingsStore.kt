@@ -18,6 +18,14 @@ class SettingsStore(context: Context) {
         get() = prefs.getInt("profile", 0)
         set(v) { prefs.edit().putInt("profile", v).apply() }
 
+    var lowLatency: Boolean
+        get() = prefs.getBoolean("low_latency", true)
+        set(v) { prefs.edit().putBoolean("low_latency", v).apply() }
+
+    var bgDim: Float
+        get() = prefs.getFloat("bg_dim", 0.35f)
+        set(v) { prefs.edit().putFloat("bg_dim", v).apply() }
+
     var gyroJson: String?
         get() = prefs.getString("gyro", null)
         set(v) { prefs.edit().putString("gyro", v).apply() }

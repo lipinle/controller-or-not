@@ -2,12 +2,20 @@ package com.example.controllerornot
 
 import android.Manifest
 import android.app.Activity
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.media.ExifInterface
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.text.TextUtils
@@ -18,8 +26,16 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
+import java.io.File
+import java.io.FileOutputStream
+import java.io.InputStream
 
 class MainActivity : Activity(), BleHidGamepad.Listener {
+
+    private companion object {
+        const val REQ_IMAGE = 100
+    }
 
     private lateinit var store: SettingsStore
     private lateinit var gamepad: BleHidGamepad
@@ -34,11 +50,14 @@ class MainActivity : Activity(), BleHidGamepad.Listener {
     private val profiles = HidProfile.values()
     private var lastStatus = "หยุดอยู่"
     private val vibrator by lazy { getSystemService(Vibrator::class.java) }
+    private val ui = Handler(Looper.getMainLooper())
+    private val bgFile: File get() = File(filesDir, "background.jpg")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = SettingsStore(this)
         gamepad = BleHidGamepad(this, this)
+        gamepad.lowLatency = store.lowLatency
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (Build.VERSION.SDK_INT >= 28) {
             val lp = window.attributes
@@ -49,6 +68,8 @@ class MainActivity : Activity(), BleHidGamepad.Listener {
         pad = GamepadView(this)
         pad.opacity = store.opacity
         pad.haptics = store.haptics
+        pad.bgDim = store.bgDim
+        loadBackground()
         pad.setLayoutJson(store.layoutJson)
         pad.onState = { gamepad.send(it) }
         pad.onEdit = { showControlEditor(it) }
@@ -227,6 +248,27 @@ class MainActivity : Activity(), BleHidGamepad.Listener {
             sheet.row("Gyroscope", if (gyro.config.enabled) "เปิด" else "ปิด", chevron = true) { sheet.dismiss(); showGyro() },
         )
 
+        sheet.section("พื้นหลัง")
+        val hasBg = pad.backgroundBitmap != null
+        val bgRows = arrayListOf(
+            sheet.row("เลือกรูปภาพ…", if (hasBg) "ใช้รูปอยู่" else "สีดำ", chevron = true) { sheet.dismiss(); pickBackground() },
+        )
+        if (hasBg) {
+            bgRows.add(sheet.slider("ความมืดของรูป", 0f, 0.85f, store.bgDim, { "${(it * 100).toInt()}%" }) { store.bgDim = it; pad.bgDim = it })
+            bgRows.add(sheet.action("ใช้พื้นหลังสีดำ", Ios.RED) { removeBackground(); sheet.dismiss() })
+        }
+        sheet.card(*bgRows.toTypedArray())
+
+        sheet.section("ความหน่วงบลูทูธ")
+        sheet.card(
+            sheet.liveRow("ส่งออกเฉลี่ย / สูงสุด") {
+                val st = gamepad.stats()
+                if (gamepad.isRunning && st.perSecond > 0) "%.1f / %.1f ms · %d/s".format(st.avgMs, st.maxMs, st.perSecond) else "–"
+            },
+            sheet.toggle("โหมดความหน่วงต่ำ (ทดลอง)", store.lowLatency) { store.lowLatency = it; gamepad.lowLatency = it },
+        )
+        sheet.note("ตัวเลขคือเวลาตั้งแต่สัมผัสจนข้อมูลออกจากมือถือ ส่วนความถี่การส่งขึ้นกับ connection interval ที่เครื่องปลายทางกำหนด (iPad ต่ำสุดราว 11–15 ms) โหมดความหน่วงต่ำจะขอ 2M PHY และ interval สั้น ถ้าเชื่อมต่อไม่เสถียรให้ปิด")
+
         sheet.section("การแสดงผล")
         sheet.card(
             sheet.slider("ความโปร่งใสของปุ่ม", 0.3f, 1f, store.opacity, { "${(it * 100).toInt()}%" }) {
@@ -327,6 +369,80 @@ class MainActivity : Activity(), BleHidGamepad.Listener {
             pad.removeSpec(s)
         })
         sheet.show()
+    }
+
+    // --- background image ------------------------------------------------------------------------
+
+    private fun loadBackground() {
+        Thread {
+            val bmp = if (bgFile.exists()) BitmapFactory.decodeFile(bgFile.path) else null
+            ui.post { pad.backgroundBitmap = bmp }
+        }.start()
+    }
+
+    private fun pickBackground() {
+        val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "image/*"
+        }
+        try {
+            startActivityForResult(i, REQ_IMAGE)
+        } catch (e: Exception) {
+            Toast.makeText(this, "เปิดตัวเลือกรูปภาพไม่ได้", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun removeBackground() {
+        bgFile.delete()
+        pad.backgroundBitmap = null
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_IMAGE && resultCode == RESULT_OK) data?.data?.let { importBackground(it) }
+    }
+
+    /** Copies the picked picture into app storage (scaled to the screen) so it survives the picker's URI grant. */
+    private fun importBackground(uri: Uri) {
+        Thread {
+            val bmp = try { decodeScaled(uri) } catch (e: Exception) { null }
+            if (bmp != null) {
+                try { FileOutputStream(bgFile).use { bmp.compress(Bitmap.CompressFormat.JPEG, 90, it) } } catch (e: Exception) { }
+            }
+            ui.post {
+                if (bmp != null) pad.backgroundBitmap = bmp
+                else Toast.makeText(this, "เปิดรูปภาพนี้ไม่ได้", Toast.LENGTH_SHORT).show()
+            }
+        }.start()
+    }
+
+    private fun decodeScaled(uri: Uri): Bitmap? {
+        val dm = resources.displayMetrics
+        val target = maxOf(dm.widthPixels, dm.heightPixels)
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= target) sample *= 2
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        var bmp = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) } ?: return null
+        val degrees = contentResolver.openInputStream(uri)?.use { exifDegrees(it) } ?: 0
+        if (degrees != 0) {
+            val m = Matrix().apply { postRotate(degrees.toFloat()) }
+            bmp = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+        }
+        return bmp
+    }
+
+    private fun exifDegrees(input: InputStream): Int = try {
+        when (ExifInterface(input).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> 90
+            ExifInterface.ORIENTATION_ROTATE_180 -> 180
+            ExifInterface.ORIENTATION_ROTATE_270 -> 270
+            else -> 0
+        }
+    } catch (e: Exception) {
+        0
     }
 
     private fun curveName(e: Float): String = when {

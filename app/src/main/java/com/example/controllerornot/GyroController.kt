@@ -70,7 +70,7 @@ class GyroController(
         if (!config.enabled) { push(0f, 0f); setActive(false); return }
         val type = if (config.mode == GyroConfig.MODE_RATE) Sensor.TYPE_GYROSCOPE else Sensor.TYPE_ACCELEROMETER
         val sensor = sm.getDefaultSensor(type) ?: return
-        sm.registerListener(this, sensor, SensorManager.SENSOR_DELAY_GAME)
+        sm.registerListener(this, sensor, SAMPLE_PERIOD_US)
     }
 
     private fun reset() {
@@ -169,5 +169,6 @@ class GyroController(
 
     private companion object {
         const val RATE_GAIN = 0.4f // stick deflection per rad/s at sensitivity 1
+        const val SAMPLE_PERIOD_US = 10_000 // 100 Hz, below the Android 12 rate limit
     }
 }
