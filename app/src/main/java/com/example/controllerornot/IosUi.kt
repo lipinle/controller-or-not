@@ -88,7 +88,7 @@ class IosSwitch(context: Context, checked: Boolean, private val onChange: (Boole
     override fun onDraw(c: Canvas) {
         val w = width.toFloat(); val h = height.toFloat()
         paint.color = if (checked) Ios.GREEN else 0xFF39393D.toInt()
-        c.drawRoundRect(0f, 0f, w, h, h / 2f, paint)
+        c.drawRoundRect(0f, 0f, w, h, h / 2f, h / 2f, paint)
         val pad = context.dpf(2f)
         val r = h / 2f - pad
         paint.color = Color.WHITE
