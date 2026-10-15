@@ -29,6 +29,9 @@ import android.os.SystemClock
 import java.util.ArrayDeque
 import java.util.UUID
 
+/** Connection stage, used by the UI to colour the status indicator. */
+enum class Link { STOPPED, ADVERTISING, CONNECTED, READY, ERROR }
+
 /**
  * Presents the phone as a Bluetooth LE HID-over-GATT (HOGP) gamepad.
  *
@@ -39,7 +42,7 @@ import java.util.UUID
 class BleHidGamepad(context: Context, private val listener: Listener) {
 
     interface Listener {
-        fun onStatus(text: String)
+        fun onStatus(link: Link, text: String)
 
         /** Rumble request from the host; magnitudes are 0..100, duration in milliseconds. */
         fun onRumble(strong: Int, weak: Int, durationMs: Int)
@@ -75,12 +78,12 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
     fun start(profile: HidProfile) {
         if (running) stop()
         if (adapter == null || !adapter.isEnabled) {
-            listener.onStatus("Bluetooth is off")
+            listener.onStatus(Link.ERROR, "Bluetooth ปิดอยู่")
             return
         }
         val adv = adapter.bluetoothLeAdvertiser
         if (adv == null) {
-            listener.onStatus("This phone cannot act as a BLE peripheral (advertising unsupported)")
+            listener.onStatus(Link.ERROR, "มือถือเครื่องนี้ไม่รองรับการทำตัวเป็นอุปกรณ์ BLE (advertise ไม่ได้)")
             return
         }
         this.profile = profile
@@ -95,7 +98,7 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
         server = appContext.getSystemService(BluetoothManager::class.java).openGattServer(appContext, gattCallback)
         if (server == null) {
             running = false
-            listener.onStatus("Could not open GATT server")
+            listener.onStatus(Link.ERROR, "เปิด GATT server ไม่ได้")
             return
         }
         buildServices()
@@ -116,7 +119,7 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
         pendingServices.clear()
         originalName?.let { runCatching { adapter?.name = it } }
         originalName = null
-        listener.onStatus("Stopped")
+        listener.onStatus(Link.STOPPED, "หยุดอยู่")
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -262,11 +265,11 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
 
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
-            main.post { listener.onStatus("Advertising as \"${profile.deviceName}\" - pair it from the iPad's Bluetooth settings") }
+            main.post { listener.onStatus(Link.ADVERTISING, "กำลังประกาศชื่อ \"${profile.deviceName}\" – ไปจับคู่ในตั้งค่า Bluetooth ของ iPad") }
         }
 
         override fun onStartFailure(errorCode: Int) {
-            main.post { listener.onStatus("Advertising failed (error $errorCode)") }
+            main.post { listener.onStatus(Link.ERROR, "ประกาศไม่สำเร็จ (error $errorCode)") }
         }
     }
 
@@ -278,7 +281,7 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
         override fun onServiceAdded(status: Int, service: BluetoothGattService) {
             main.post {
                 if (status != BluetoothGatt.GATT_SUCCESS) {
-                    listener.onStatus("Adding GATT service failed ($status)")
+                    listener.onStatus(Link.ERROR, "เพิ่ม GATT service ไม่สำเร็จ ($status)")
                 } else if (running) {
                     addNextService()
                 }
@@ -289,12 +292,12 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
             main.post {
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
                     connected.add(device)
-                    listener.onStatus("Connected to ${device.name ?: device.address}")
+                    listener.onStatus(Link.CONNECTED, "เชื่อมต่อกับ ${device.name ?: device.address} แล้ว")
                 } else {
                     connected.remove(device)
                     subscribed.remove(device.address)
                     if (running) {
-                        listener.onStatus("Disconnected - advertising again")
+                        listener.onStatus(Link.ADVERTISING, "หลุดการเชื่อมต่อ – กำลังประกาศใหม่")
                         startAdvertising()
                     }
                 }
@@ -335,7 +338,7 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
                 main.post {
                     if (enabled) subscribed.add(device.address) else subscribed.remove(device.address)
                     if (enabled) {
-                        listener.onStatus("Controller ready - host is listening")
+                        listener.onStatus(Link.READY, "พร้อมใช้งาน – เครื่องปลายทางรับสัญญาณแล้ว")
                         synchronized(this@BleHidGamepad) { dirty = true; notifyBusy = false }
                         pump()
                     }
