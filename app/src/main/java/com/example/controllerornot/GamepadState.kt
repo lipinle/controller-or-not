@@ -22,6 +22,7 @@ data class GamepadState(
         const val GUIDE = 1 shl 12
         const val LS = 1 shl 13
         const val RS = 1 shl 14
+        const val SHARE = 1 shl 15 // not part of the 15 regular buttons: sent as the Share (Record) bit
 
         // Hat switch: 0 = released, 1 = up, then clockwise in 45 degree steps (2 = up-right ... 8 = up-left).
         const val HAT_NEUTRAL = 0

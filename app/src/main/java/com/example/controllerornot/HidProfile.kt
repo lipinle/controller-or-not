@@ -97,7 +97,7 @@ object HidReport {
         b.putShort(trigger(s.rt).toShort())
         b.put((s.hat and 0x0F).toByte())
         b.putShort((s.buttons and 0x7FFF).toShort())
-        b.put(0)                                                   // Share button + padding
+        b.put(if (s.buttons and GamepadState.SHARE != 0) 1 else 0) // Share button + padding
         return b.array()
     }
 }
