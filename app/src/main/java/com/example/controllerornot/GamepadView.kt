@@ -31,6 +31,7 @@ class GamepadView(context: Context) : View(context) {
     var onEdit: ((ControlSpec) -> Unit)? = null
     var onLayoutChanged: (() -> Unit)? = null
     var onGyroButton: ((Boolean) -> Unit)? = null
+    var onKeyboardButton: (() -> Unit)? = null
 
     var opacity = 0.95f
         set(v) { field = v.coerceIn(0.2f, 1f); invalidate() }
@@ -65,6 +66,7 @@ class GamepadView(context: Context) : View(context) {
     private var last: GamepadState? = null
     private var prevPressed: Set<ControlSpec> = emptySet()
     private var lastGyroHeld = false
+    private var lastKbDown = false
     private var gyroX = 0f
     private var gyroY = 0f
     private var gyroRight = true
@@ -131,6 +133,14 @@ class GamepadView(context: Context) : View(context) {
         releaseAll()
         onLayoutChanged?.invoke()
         emit()
+        invalidate()
+    }
+
+    /** Adds the keyboard button to the layout when it was removed (used when the keyboard feature is switched on). */
+    fun ensureKeyboardButton() {
+        if (specsList.any { it.kind == Kind.KEYBOARD_BTN }) return
+        specsList.add(Layout.keyboardButton(Layout.newId("kbd", specsList)))
+        onLayoutChanged?.invoke()
         invalidate()
     }
 
@@ -233,6 +243,7 @@ class GamepadView(context: Context) : View(context) {
             Kind.DYN_STICK_L, Kind.DYN_STICK_R -> drawDynamic(c, s)
             Kind.TOUCH_STRIP -> drawStrip(c, s)
             Kind.GYRO_BTN -> drawGyroButton(c, s)
+            Kind.KEYBOARD_BTN -> drawKeyboardButton(c, s)
         }
     }
 
@@ -274,6 +285,20 @@ class GamepadView(context: Context) : View(context) {
         c.drawText(text, x, y - (label.fontMetrics.ascent + label.fontMetrics.descent) / 2f, label)
     }
 
+    /** Draws [text] centred, shrinking the font so it never overflows [maxWidth] (long custom names). */
+    private fun fitText(c: Canvas, text: String, x: Float, y: Float, baseSize: Float, maxWidth: Float, color: Int) {
+        label.textSize = baseSize
+        val w = label.measureText(text)
+        val size = if (w > maxWidth && w > 0f) baseSize * maxWidth / w else baseSize
+        centeredText(c, text, x, y, max(size, u * 0.16f), color)
+    }
+
+    private fun drawKeyboardButton(c: Canvas, s: ControlSpec) {
+        val x = cx(s); val y = cy(s); val r = rad(s)
+        glassCircle(c, x, y, r, s.down, PRESS_WHITE)
+        fitText(c, s.labelOr("Aa"), x, y, r * 0.85f, r * 1.7f, if (s.down) DARK else 0xFFFFFFFF.toInt())
+    }
+
     private fun drawButton(c: Canvas, s: ControlSpec) {
         val o = s.output
         val x = cx(s); val y = cy(s); val r = rad(s); val hh = halfH(s)
@@ -286,14 +311,14 @@ class GamepadView(context: Context) : View(context) {
             o == Output.NONE -> 0x66FFFFFF
             else -> 0xFFFFFFFF.toInt()
         }
-        centeredText(c, o.label, x, y, size, color)
+        fitText(c, s.labelOr(o.label), x, y, size, if (s.shape == Shape.CIRCLE) r * 1.7f else r * 1.85f, color)
     }
 
     private fun drawGyroButton(c: Canvas, s: ControlSpec) {
         val x = cx(s); val y = cy(s); val r = rad(s); val hh = halfH(s)
         val on = s.down || gyroActive
         glassPill(c, x, y, r, hh, on, GREEN)
-        centeredText(c, "GYRO", x, y, hh * 0.82f, if (on) 0xFFFFFFFF.toInt() else 0xFFFFFFFF.toInt())
+        fitText(c, s.labelOr("GYRO"), x, y, hh * 0.82f, r * 1.8f, 0xFFFFFFFF.toInt())
     }
 
     private fun drawStickBody(c: Canvas, x: Float, y: Float, r: Float, sx: Float, sy: Float, active: Boolean, letter: String) {
@@ -327,7 +352,7 @@ class GamepadView(context: Context) : View(context) {
         stroke.pathEffect = DashPathEffect(floatArrayOf(u * 0.25f, u * 0.2f), 0f)
         c.drawRoundRect(rect, u * 0.6f, u * 0.6f, stroke)
         stroke.pathEffect = null
-        centeredText(c, if (left) "◎ L" else "◎ R", cx(s), cy(s), u * 0.55f, 0x40FFFFFF)
+        fitText(c, s.labelOr(if (left) "◎ L" else "◎ R"), cx(s), cy(s), u * 0.55f, halfW(s) * 1.6f, 0x66FFFFFF)
     }
 
     private fun drawStrip(c: Canvas, s: ControlSpec) {
@@ -349,7 +374,10 @@ class GamepadView(context: Context) : View(context) {
             else -> "▲\n▼"
         }
         val col = if (s.down) 0xFFFFFFFF.toInt() else 0x55FFFFFF
-        if (glyph.contains('\n')) {
+        val custom = s.customLabel?.takeIf { it.isNotBlank() }
+        if (custom != null) {
+            fitText(c, custom, x, y, u * 0.6f, hw * 1.6f, col)
+        } else if (glyph.contains('\n')) {
             centeredText(c, "▲", x, y - u * 0.35f, u * 0.45f, col)
             centeredText(c, "▼", x, y + u * 0.35f, u * 0.45f, col)
         } else {
@@ -682,6 +710,10 @@ class GamepadView(context: Context) : View(context) {
         if (haptics && pressedNow.any { it !in prevPressed }) performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
         prevPressed = pressedNow
 
+        val kbDown = specsList.any { it.kind == Kind.KEYBOARD_BTN && it.down }
+        if (kbDown && !lastKbDown) onKeyboardButton?.invoke()
+        lastKbDown = kbDown
+
         val gyroHeld = specsList.any { it.kind == Kind.GYRO_BTN && it.down }
         if (gyroHeld != lastGyroHeld) {
             lastGyroHeld = gyroHeld
@@ -754,6 +786,7 @@ class GamepadView(context: Context) : View(context) {
     private fun releaseAll() {
         for (s in specsList) { s.down = false; s.dirMask = 0; releaseStick(s) }
         prevPressed = emptySet()
+        lastKbDown = false
         if (lastGyroHeld) { lastGyroHeld = false; onGyroButton?.invoke(false) }
     }
 
@@ -778,7 +811,7 @@ class GamepadView(context: Context) : View(context) {
                     if (s.dirMask and ControlSpec.DIR_DOWN != 0) down = true
                     if (s.dirMask and ControlSpec.DIR_LEFT != 0) left = true
                 }
-                Kind.GYRO_BTN -> Unit
+                Kind.GYRO_BTN, Kind.KEYBOARD_BTN -> Unit
                 Kind.BUTTON -> if (s.down) when (s.output) {
                     Output.NONE -> Unit
                     Output.LT -> lt = 1f

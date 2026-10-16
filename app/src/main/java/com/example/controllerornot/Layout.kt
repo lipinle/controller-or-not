@@ -32,6 +32,7 @@ enum class Kind {
     DYN_STICK_L, DYN_STICK_R, // dynamic joystick: appears wherever you touch inside its zone
     TOUCH_STRIP,              // swipe area that emulates turning a stick
     GYRO_BTN,                 // hold / toggle button for the gyro emulation
+    KEYBOARD_BTN,             // opens the on-screen text entry that types on the host
 }
 
 enum class Shape { CIRCLE, PILL, RECT }
@@ -56,11 +57,15 @@ class ControlSpec(
     var zoneH: Float = 0f,
     var stick: StickConfig = StickConfig(),
     var strip: StripConfig = StripConfig(),
+    var customLabel: String? = null,
 ) {
     val isStickLike: Boolean
         get() = kind == Kind.STICK_L || kind == Kind.STICK_R || kind == Kind.DYN_STICK_L || kind == Kind.DYN_STICK_R
     val isDynamic: Boolean get() = kind == Kind.DYN_STICK_L || kind == Kind.DYN_STICK_R
     val isZone: Boolean get() = kind == Kind.DYN_STICK_L || kind == Kind.DYN_STICK_R || kind == Kind.TOUCH_STRIP
+
+    /** Text drawn on the control: the user's own name if set, otherwise [fallback]. */
+    fun labelOr(fallback: String): String = customLabel?.takeIf { it.isNotBlank() } ?: fallback
 
     // Runtime touch state (never persisted).
     var down = false
@@ -123,6 +128,7 @@ object Layout {
             pill("menu", 0.8f, 0.55f, cx + 1.8f * u / w, b(0.9f), Output.MENU),
             circle("l3", Kind.BUTTON, 0.55f, l(4.9f), t(3.1f), Output.LS),
             circle("r3", Kind.BUTTON, 0.55f, r(8.7f), t(6.2f), Output.RS),
+            keyboardButton("kbd").also { it.x = 0.5f - 4.6f * u / w; it.y = t(0.8f) },
         )
     }
 
@@ -160,7 +166,10 @@ object Layout {
             ControlSpec(id, Kind.TOUCH_STRIP, Shape.RECT, 1f, 0.75f, 0.5f, zoneW = 8f, zoneH = 3f)
         },
         PaletteItem("Gyro") { id -> ControlSpec(id, Kind.GYRO_BTN, Shape.PILL, 0.8f, 0.5f, 0.5f, aspect = 0.55f) },
+        PaletteItem("แป้นพิมพ์") { id -> keyboardButton(id) },
     )
+
+    fun keyboardButton(id: String) = ControlSpec(id, Kind.KEYBOARD_BTN, Shape.CIRCLE, 0.55f, 0.36f, 0.09f)
 
     /** A fresh id for a control created from the palette. */
     fun newId(prefix: String, existing: List<ControlSpec>): String {
@@ -179,6 +188,7 @@ object Layout {
         .put("x", s.x.toDouble()).put("y", s.y.toDouble()).put("scale", s.scale.toDouble())
         .put("out", s.output.name).put("zw", s.zoneW.toDouble()).put("zh", s.zoneH.toDouble())
         .put("stick", s.stick.toJson()).put("strip", s.strip.toJson())
+        .put("label", s.customLabel ?: "")
 
     fun specFromJson(o: JSONObject): ControlSpec {
         val kind = Kind.valueOf(o.getString("kind"))
@@ -196,6 +206,7 @@ object Layout {
             zoneH = o.optDouble("zh", 0.0).toFloat().coerceIn(0f, 40f),
             stick = StickConfig.fromJson(o.optJSONObject("stick")),
             strip = StripConfig.fromJson(o.optJSONObject("strip")),
+            customLabel = o.optString("label", "").take(20).ifBlank { null },
         )
     }
 
@@ -203,7 +214,7 @@ object Layout {
     fun copyInto(dst: ControlSpec, src: ControlSpec) {
         dst.x = src.x; dst.y = src.y; dst.scale = src.scale; dst.output = src.output
         dst.zoneW = src.zoneW; dst.zoneH = src.zoneH; dst.baseRadius = src.baseRadius
-        dst.stick = src.stick.copy(); dst.strip = src.strip.copy()
+        dst.stick = src.stick.copy(); dst.strip = src.strip.copy(); dst.customLabel = src.customLabel
     }
 
     fun toJson(specs: List<ControlSpec>): String {

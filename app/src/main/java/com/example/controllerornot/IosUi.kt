@@ -236,6 +236,8 @@ class IosSheet(private val activity: Activity, title: String, private val tall: 
         }
     }
 
+    val window: Window? get() = dialog.window
+
     fun onDismiss(l: () -> Unit) { dismissListener = l }
     fun dismiss() = dialog.dismiss()
 
@@ -407,7 +409,7 @@ class IosSheet(private val activity: Activity, title: String, private val tall: 
     }
 
     /** A grid of selectable chips (used to pick what a button sends). */
-    fun chipGrid(options: List<String>, selected: Int, columns: Int, onSelect: (Int) -> Unit): View {
+    fun chipGrid(options: List<String>, selected: Int, columns: Int, momentary: Boolean = false, onSelect: (Int) -> Unit): View {
         val grid = GridLayout(ctx).apply {
             columnCount = columns
             setPadding(ctx.dp(10), ctx.dp(10), ctx.dp(10), ctx.dp(10))
@@ -425,7 +427,7 @@ class IosSheet(private val activity: Activity, title: String, private val tall: 
                 gravity = Gravity.CENTER
                 setTextColor(Ios.LABEL)
                 setPadding(ctx.dp(4), ctx.dp(10), ctx.dp(4), ctx.dp(10))
-                setOnClickListener { paint(i); onSelect(i) }
+                setOnClickListener { if (!momentary) paint(i); onSelect(i) }
             }
             cells.add(tv)
             val lp = GridLayout.LayoutParams(GridLayout.spec(GridLayout.UNDEFINED), GridLayout.spec(GridLayout.UNDEFINED, 1f))
@@ -435,6 +437,34 @@ class IosSheet(private val activity: Activity, title: String, private val tall: 
         }
         paint(selected)
         return grid
+    }
+
+    /** A styled text field to put inside a [card]. [onChange] fires on every edit. */
+    fun editText(initial: String, hint: String, maxLen: Int = 0, multiline: Boolean = false, onChange: (String) -> Unit): android.widget.EditText {
+        val et = android.widget.EditText(ctx)
+        et.setText(initial)
+        et.hint = hint
+        et.setTextColor(Ios.LABEL)
+        et.setHintTextColor(Ios.SECONDARY)
+        et.textSize = 16f
+        et.setBackgroundColor(Color.TRANSPARENT)
+        et.setPadding(ctx.dp(16), ctx.dp(13), ctx.dp(16), ctx.dp(13))
+        et.imeOptions = android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI or android.view.inputmethod.EditorInfo.IME_FLAG_NO_FULLSCREEN
+        if (multiline) {
+            et.inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            et.minLines = 3
+            et.gravity = Gravity.TOP or Gravity.START
+        } else {
+            et.inputType = android.text.InputType.TYPE_CLASS_TEXT
+            et.setSingleLine(true)
+        }
+        if (maxLen > 0) et.filters = arrayOf(android.text.InputFilter.LengthFilter(maxLen))
+        et.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) = Unit
+            override fun afterTextChanged(s: android.text.Editable?) { onChange(s?.toString() ?: "") }
+        })
+        return et
     }
 
     fun plain(v: View, topDp: Int = 12) {

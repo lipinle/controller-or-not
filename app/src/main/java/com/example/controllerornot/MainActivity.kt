@@ -23,6 +23,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -73,6 +74,7 @@ class MainActivity : Activity(), BleHidGamepad.Listener {
         pad.setLayoutJson(store.layoutJson)
         pad.onState = { gamepad.send(it) }
         pad.onEdit = { showControlEditor(it) }
+        pad.onKeyboardButton = { showKeyboard() }
         pad.onLayoutChanged = { store.layoutJson = pad.layoutJson() }
 
         gyro = GyroController(this, { x, y, right -> pad.setGyro(x, y, right) }, { pad.gyroActive = it })
@@ -225,7 +227,7 @@ class MainActivity : Activity(), BleHidGamepad.Listener {
                 if (gamepad.isRunning) {
                     gamepad.stop()
                 } else {
-                    ensurePermissionsThen { gamepad.start(profiles[store.profileIndex.coerceIn(0, profiles.size - 1)]) }
+                    ensurePermissionsThen { startGamepad() }
                 }
                 sheet.dismiss()
             },
@@ -235,7 +237,7 @@ class MainActivity : Activity(), BleHidGamepad.Listener {
         val rows = profiles.mapIndexed { i, p ->
             sheet.choice(p.label, i == store.profileIndex) {
                 store.profileIndex = i
-                if (gamepad.isRunning) gamepad.start(p)
+                if (gamepad.isRunning) startGamepad(p)
                 sheet.dismiss()
                 showSettings()
             }
@@ -245,8 +247,16 @@ class MainActivity : Activity(), BleHidGamepad.Listener {
         sheet.section("ปุ่มและเซ็นเซอร์")
         sheet.card(
             sheet.row("จัดวาง เพิ่ม ลบ และตั้งค่าปุ่ม", chevron = true) { sheet.dismiss(); setEditMode(true) },
+            sheet.row("พรีเซ็ตเลย์เอาต์", chevron = true) { sheet.dismiss(); showPresets() },
             sheet.row("Gyroscope", if (gyro.config.enabled) "เปิด" else "ปิด", chevron = true) { sheet.dismiss(); showGyro() },
         )
+
+        sheet.section("แป้นพิมพ์")
+        sheet.card(
+            sheet.toggle("เปิดใช้งานแป้นพิมพ์บลูทูธ (ทดลอง)", store.keyboardEnabled) { setKeyboardEnabled(it) },
+            sheet.row("เปิดช่องพิมพ์ข้อความ", chevron = true) { sheet.dismiss(); showKeyboard() },
+        )
+        sheet.note("เปิดแล้วมือถือจะแสดงเป็นแป้นพิมพ์ด้วย ใช้พิมพ์ข้อความในเกม ต้องลืมอุปกรณ์บน iPad แล้วจับคู่ใหม่ทุกครั้งที่เปิด/ปิด")
 
         sheet.section("พื้นหลัง")
         val hasBg = pad.backgroundBitmap != null
@@ -291,6 +301,7 @@ class MainActivity : Activity(), BleHidGamepad.Listener {
             Kind.DYN_STICK_R -> "Dynamic Joystick ขวา"
             Kind.TOUCH_STRIP -> "แถบสัมผัส"
             Kind.GYRO_BTN -> "ปุ่ม Gyro"
+            Kind.KEYBOARD_BTN -> "ปุ่มแป้นพิมพ์"
         }
         val sheet = IosSheet(this, title)
         sheet.onDismiss {
@@ -350,6 +361,22 @@ class MainActivity : Activity(), BleHidGamepad.Listener {
             sheet.note("ปุ่มนี้ใช้เปิด/ปิดหรือกดค้างเพื่อใช้ Gyro ตั้งโหมดได้ที่ ••• → Gyroscope")
         }
 
+        if (s.kind == Kind.BUTTON || s.kind == Kind.GYRO_BTN || s.kind == Kind.KEYBOARD_BTN || s.isZone) {
+            sheet.section("ชื่อที่แสดงบนปุ่ม")
+            val defaultName = when (s.kind) {
+                Kind.BUTTON -> s.output.label
+                Kind.GYRO_BTN -> "GYRO"
+                Kind.KEYBOARD_BTN -> "Aa"
+                else -> ""
+            }
+            val hint = if (defaultName.isEmpty()) "ไม่มีชื่อ" else "ค่าเริ่มต้น: $defaultName"
+            sheet.card(sheet.editText(s.customLabel ?: "", hint, 14) {
+                s.customLabel = it.trim().ifEmpty { null }
+                pad.invalidate()
+            })
+            sheet.note("เว้นว่างเพื่อใช้ชื่อเดิม ชื่อยาวจะถูกย่อให้พอดีปุ่ม")
+        }
+
         sheet.section("ขนาดและตำแหน่ง")
         val rows = ArrayList<View>()
         if (s.isZone) {
@@ -369,6 +396,167 @@ class MainActivity : Activity(), BleHidGamepad.Listener {
             pad.removeSpec(s)
         })
         sheet.show()
+    }
+
+    // --- keyboard ---------------------------------------------------------------------------------
+
+    private fun startGamepad(profile: HidProfile = profiles[store.profileIndex.coerceIn(0, profiles.size - 1)]) {
+        gamepad.start(profile, store.keyboardEnabled)
+    }
+
+    private fun toast(text: String, long: Boolean = false) =
+        Toast.makeText(this, text, if (long) Toast.LENGTH_LONG else Toast.LENGTH_SHORT).show()
+
+    private fun setKeyboardEnabled(on: Boolean) {
+        store.keyboardEnabled = on
+        if (on) pad.ensureKeyboardButton()
+        if (gamepad.isRunning) startGamepad()
+        toast("ไปที่ตั้งค่า Bluetooth ของ iPad กด Forget อุปกรณ์นี้ แล้วจับคู่ใหม่", long = true)
+    }
+
+    private val specialKeys = listOf(
+        "Enter" to Keyboard.ENTER, "⌫" to Keyboard.BACKSPACE, "Del" to Keyboard.DELETE, "Esc" to Keyboard.ESC, "Tab" to Keyboard.TAB,
+        "Space" to Keyboard.SPACE, "←" to Keyboard.LEFT, "↑" to Keyboard.UP, "↓" to Keyboard.DOWN, "→" to Keyboard.RIGHT,
+    )
+
+    private fun showKeyboard() {
+        val sheet = IosSheet(this, "แป้นพิมพ์")
+        sheet.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        sheet.onDismiss { hideSystemBars() }
+        sheet.headerButton("เสร็จ", left = false, bold = true) { sheet.dismiss() }
+
+        if (!store.keyboardEnabled) {
+            sheet.note("แป้นพิมพ์ทำให้มือถือเครื่องนี้แสดงเป็นคีย์บอร์ดบลูทูธด้วย จึงใช้พิมพ์ข้อความลงในเกมบน iPad ได้ ต้องจับคู่ iPad ใหม่หลังเปิดใช้งาน")
+            sheet.card(sheet.action("เปิดใช้งานแป้นพิมพ์", Ios.BLUE) { setKeyboardEnabled(true); sheet.dismiss() })
+            sheet.show()
+            return
+        }
+        if (gamepad.isRunning && !gamepad.keyboardReady) {
+            sheet.note("⚠︎ iPad ยังไม่ได้เชื่อมต่อแป้นพิมพ์ ให้ Forget อุปกรณ์บน iPad แล้วจับคู่ใหม่ (ถ้าเพิ่งเปิดใช้งาน)")
+        }
+
+        sheet.section("ข้อความ")
+        val field = sheet.editText("", "พิมพ์ข้อความที่นี่ (ใช้แป้นพิมพ์ของมือถือ)", 0, multiline = true) { }
+        sheet.card(field)
+        sheet.card(
+            sheet.action("ส่งข้อความไปที่ iPad", Ios.BLUE) { sendTyped(field) },
+            sheet.toggle("กด Enter ต่อท้าย", store.kbEnter) { store.kbEnter = it },
+            sheet.segmented("ภาษาของแป้นพิมพ์บน iPad", listOf("English", "ไทย (เกษมณี)"), if (store.kbThai) 1 else 0) { store.kbThai = it == 1 },
+        )
+        sheet.note("ต้องสลับภาษาบน iPad ให้ตรงกับที่เลือก ภาษาไทยต้องเป็นแป้นพิมพ์ไทยแบบเกษมณี ตัวอักษรที่พิมพ์ไม่ได้ (อีโมจิ ฯลฯ) จะถูกข้าม")
+
+        sheet.section("ปุ่มพิเศษ")
+        sheet.card(sheet.chipGrid(specialKeys.map { it.first }, -1, 5, momentary = true) { i -> sendKey(specialKeys[i].second) })
+
+        sheet.show()
+        field.post { field.requestFocus() }
+    }
+
+    private fun sendKey(code: Int) {
+        if (!gamepad.typeReports(Keyboard.tap(code))) toast("iPad ยังไม่ได้เชื่อมต่อแป้นพิมพ์")
+    }
+
+    private fun sendTyped(field: EditText) {
+        val text = field.text.toString() + if (store.kbEnter) "\n" else ""
+        val result = Keyboard.reports(text, store.kbThai)
+        when {
+            result.reports.isEmpty() -> toast("ไม่มีตัวอักษรที่พิมพ์ได้")
+            !gamepad.typeReports(result.reports) -> toast("iPad ยังไม่ได้เชื่อมต่อแป้นพิมพ์", long = true)
+            else -> {
+                field.setText("")
+                toast(if (result.skipped > 0) "ส่งแล้ว (ข้าม ${result.skipped} ตัวที่พิมพ์ไม่ได้)" else "ส่งแล้ว")
+            }
+        }
+    }
+
+    // --- presets ----------------------------------------------------------------------------------
+
+    private fun applyLayout(json: String) {
+        pad.setLayoutJson(json)
+        store.layoutJson = json
+    }
+
+    private fun showPresets() {
+        val sheet = IosSheet(this, "พรีเซ็ตเลย์เอาต์")
+        sheet.onDismiss { hideSystemBars() }
+        sheet.headerButton("เสร็จ", left = false, bold = true) { sheet.dismiss() }
+
+        sheet.section("ในตัว")
+        sheet.card(*Presets.builtIn.map { b ->
+            sheet.row(b.name, "ใช้") { applyLayout(Layout.toJson(b.build(pad.width, pad.height))); sheet.dismiss() }
+        }.toTypedArray())
+        sheet.note(Presets.builtIn.joinToString("\n") { "• ${it.name}: ${it.description}" })
+
+        sheet.section("ของฉัน")
+        val names = store.presetNames()
+        if (names.isEmpty()) {
+            sheet.note("ยังไม่มีพรีเซ็ตที่บันทึกไว้")
+        } else {
+            sheet.card(*names.map { n ->
+                sheet.row(n, "จัดการ", chevron = true) { sheet.dismiss(); showPresetActions(n) }
+            }.toTypedArray())
+        }
+        sheet.card(sheet.action("บันทึกเลย์เอาต์ปัจจุบันเป็นพรีเซ็ตใหม่…", Ios.BLUE) {
+            sheet.dismiss()
+            promptText("บันทึกพรีเซ็ต", "", "บันทึก") { name ->
+                store.putPreset(name, pad.layoutJson())
+                toast("บันทึก “$name” แล้ว")
+                showPresets()
+            }
+        })
+        sheet.note("พรีเซ็ตเก็บตำแหน่ง ขนาด ชื่อ การกำหนดปุ่ม และค่าจูนสติ๊ก/แถบสัมผัสของทุกปุ่ม")
+        sheet.show()
+    }
+
+    private fun showPresetActions(name: String) {
+        val sheet = IosSheet(this, name, tall = false, widthFrac = 0.5f)
+        sheet.onDismiss { hideSystemBars() }
+        sheet.headerButton("ปิด", left = false, bold = true) { sheet.dismiss() }
+        sheet.card(
+            sheet.action("ใช้พรีเซ็ตนี้", Ios.BLUE) {
+                store.presetJson(name)?.let { applyLayout(it) }
+                sheet.dismiss()
+            },
+            sheet.action("เขียนทับด้วยเลย์เอาต์ปัจจุบัน", Ios.BLUE) {
+                store.putPreset(name, pad.layoutJson())
+                toast("อัปเดต “$name” แล้ว")
+                sheet.dismiss()
+            },
+            sheet.action("เปลี่ยนชื่อ…", Ios.BLUE) {
+                sheet.dismiss()
+                promptText("เปลี่ยนชื่อพรีเซ็ต", name, "ตกลง") { newName ->
+                    store.renamePreset(name, newName)
+                    showPresets()
+                }
+            },
+            sheet.action("ลบพรีเซ็ตนี้", Ios.RED) {
+                store.removePreset(name)
+                sheet.dismiss()
+                showPresets()
+            },
+        )
+        sheet.show()
+    }
+
+    /** Small sheet with one text field; calls [onOk] with the trimmed, non-blank text. */
+    private fun promptText(title: String, initial: String, okLabel: String, onOk: (String) -> Unit) {
+        val sheet = IosSheet(this, title, tall = false, widthFrac = 0.5f)
+        sheet.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        sheet.onDismiss { hideSystemBars() }
+        val field = sheet.editText(initial, "ชื่อ", 24) { }
+        sheet.headerButton("ยกเลิก", left = true, bold = false) { sheet.dismiss() }
+        sheet.headerButton(okLabel, left = false, bold = true) {
+            val name = field.text.toString().trim()
+            if (name.isEmpty()) {
+                toast("กรุณาใส่ชื่อ")
+            } else {
+                sheet.dismiss()
+                onOk(name)
+            }
+        }
+        sheet.card(field)
+        sheet.show()
+        field.post { field.requestFocus(); field.setSelection(field.text.length) }
     }
 
     // --- background image ------------------------------------------------------------------------

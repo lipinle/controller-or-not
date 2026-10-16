@@ -1,6 +1,7 @@
 package com.example.controllerornot
 
 import android.content.Context
+import org.json.JSONObject
 
 /** Persisted user preferences (layout, mapping, look & feel). */
 class SettingsStore(context: Context) {
@@ -25,6 +26,54 @@ class SettingsStore(context: Context) {
     var bgDim: Float
         get() = prefs.getFloat("bg_dim", 0.35f)
         set(v) { prefs.edit().putFloat("bg_dim", v).apply() }
+
+    var keyboardEnabled: Boolean
+        get() = prefs.getBoolean("keyboard", false)
+        set(v) { prefs.edit().putBoolean("keyboard", v).apply() }
+
+    var kbThai: Boolean
+        get() = prefs.getBoolean("kb_thai", false)
+        set(v) { prefs.edit().putBoolean("kb_thai", v).apply() }
+
+    var kbEnter: Boolean
+        get() = prefs.getBoolean("kb_enter", true)
+        set(v) { prefs.edit().putBoolean("kb_enter", v).apply() }
+
+    // --- named layout presets (name -> layout JSON) ---
+
+    private fun presetObject(): JSONObject = try {
+        JSONObject(prefs.getString("presets", null) ?: "{}")
+    } catch (e: Exception) {
+        JSONObject()
+    }
+
+    fun presetNames(): List<String> {
+        val o = presetObject()
+        val out = ArrayList<String>()
+        val it = o.keys()
+        while (it.hasNext()) out.add(it.next())
+        return out
+    }
+
+    fun presetJson(name: String): String? = presetObject().optString(name, "").ifEmpty { null }
+
+    fun putPreset(name: String, layoutJson: String) {
+        prefs.edit().putString("presets", presetObject().put(name, layoutJson).toString()).apply()
+    }
+
+    fun removePreset(name: String) {
+        val o = presetObject()
+        o.remove(name)
+        prefs.edit().putString("presets", o.toString()).apply()
+    }
+
+    fun renamePreset(old: String, new: String) {
+        val json = presetJson(old) ?: return
+        val o = presetObject()
+        o.remove(old)
+        o.put(new, json)
+        prefs.edit().putString("presets", o.toString()).apply()
+    }
 
     var gyroJson: String?
         get() = prefs.getString("gyro", null)

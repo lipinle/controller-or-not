@@ -39,6 +39,8 @@ object HidReport {
     const val INPUT_REPORT_ID = 1
     const val OUTPUT_REPORT_ID = 3
     const val INPUT_REPORT_SIZE = 16
+    const val KEYBOARD_REPORT_ID = 4
+    const val KEYBOARD_REPORT_SIZE = 8
 
     /** HID report map laid out like the Xbox wireless controller: report 1 = input, report 3 = rumble. */
     val REPORT_MAP: ByteArray = intArrayOf(
@@ -82,6 +84,21 @@ object HidReport {
         0xC0,
         0xC0,
     ).map { it.toByte() }.toByteArray()
+
+    /** Standard 6-key-rollover keyboard collection (report 4), appended when the keyboard feature is on. */
+    private val KEYBOARD_MAP: ByteArray = intArrayOf(
+        0x05, 0x01, 0x09, 0x06, 0xA1, 0x01,                          // Keyboard, Application collection
+        0x85, KEYBOARD_REPORT_ID,                                    //   Report ID 4
+        0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7,                          //   modifier keys (E0..E7)
+        0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
+        0x95, 0x01, 0x75, 0x08, 0x81, 0x01,                          //   reserved byte
+        0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x25, 0x65,              //   six key codes
+        0x05, 0x07, 0x19, 0x00, 0x29, 0x65, 0x81, 0x00,
+        0xC0,
+    ).map { it.toByte() }.toByteArray()
+
+    /** The report map the host sees; the gamepad part is identical whether or not the keyboard is added. */
+    fun reportMap(keyboard: Boolean): ByteArray = if (keyboard) REPORT_MAP + KEYBOARD_MAP else REPORT_MAP
 
     private fun axis(v: Float): Int = (((v.coerceIn(-1f, 1f) + 1f) / 2f) * 65535f).toInt()
     private fun trigger(v: Float): Int = (v.coerceIn(0f, 1f) * 1023f).toInt()
