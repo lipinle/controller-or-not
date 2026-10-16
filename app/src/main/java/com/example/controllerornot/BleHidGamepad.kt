@@ -65,15 +65,12 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
     private var server: BluetoothGattServer? = null
     private var advertiser: BluetoothLeAdvertiser? = null
     private var inputReport: BluetoothGattCharacteristic? = null
-    private var keyboardReport: BluetoothGattCharacteristic? = null
-    private var keyboardEnabled = false
     private var originalName: String? = null
     private var running = false
 
     private val pendingServices = ArrayDeque<BluetoothGattService>()
     private val connected = LinkedHashSet<BluetoothDevice>()                // main thread only
-    private val subscribed = ConcurrentHashMap<String, BluetoothDevice>()   // devices that enabled gamepad notifications
-    private val kbSubscribed = ConcurrentHashMap<String, BluetoothDevice>() // ... and keyboard notifications
+    private val subscribed = ConcurrentHashMap<String, BluetoothDevice>()   // devices that enabled notifications
     private val fastLinks = HashMap<String, BluetoothGatt>()                // main thread only
 
     private var protocolMode: Byte = 1 // report protocol
@@ -93,12 +90,11 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
         }
 
     // Outgoing report queue, drained by a dedicated high-priority thread. Everything below is guarded by [queue].
-    private class Pending(var data: ByteArray, val queuedAtNs: Long, val kind: Int = KIND_GAMEPAD)
+    private class Pending(var data: ByteArray, val queuedAtNs: Long)
     private val queue = ArrayDeque<Pending>()
     private var notifyBusy = false
     private var notifyStartedAt = 0L
     private var inFlightQueuedNs = 0L
-    private var inFlightKind = KIND_GAMEPAD
     private var failures = 0
     private var latEmaMs = 0f
     private var winStartNs = 0L
@@ -118,7 +114,7 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
     // Lifecycle
     // ---------------------------------------------------------------------------------------------
 
-    fun start(profile: HidProfile, keyboard: Boolean = false) {
+    fun start(profile: HidProfile) {
         if (running) stop()
         if (adapter == null || !adapter.isEnabled) {
             listener.onStatus(Link.ERROR, "Bluetooth ปิดอยู่")
@@ -130,7 +126,6 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
             return
         }
         this.profile = profile
-        this.keyboardEnabled = keyboard
         advertiser = adv
         running = true
         synchronized(queue) {
@@ -167,11 +162,9 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
         server = null
         advertiser = null
         inputReport = null
-        keyboardReport = null
         closeAllFastLinks()
         connected.clear()
         subscribed.clear()
-        kbSubscribed.clear()
         pendingServices.clear()
         sender?.removeCallbacksAndMessages(null)
         sender = null
@@ -196,33 +189,16 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
         val now = SystemClock.elapsedRealtimeNanos()
         synchronized(queue) {
             val tail = queue.peekLast()
-            if (tail != null && tail.kind == KIND_GAMEPAD && sameDigital(tail.data, report)) {
+            if (tail != null && sameDigital(tail.data, report)) {
                 // only analog values moved: newest wins, no point sending the stale one
                 tail.data = report
             } else {
                 // a button / trigger / hat edge must reach the host even if it is released again right away
-                if (queue.count { it.kind == KIND_GAMEPAD } >= MAX_QUEUE) {
-                    val iter = queue.iterator()
-                    while (iter.hasNext()) {
-                        if (iter.next().kind == KIND_GAMEPAD) { iter.remove(); break }
-                    }
-                }
-                queue.addLast(Pending(report, now, KIND_GAMEPAD))
+                if (queue.size >= MAX_QUEUE) queue.pollFirst()
+                queue.addLast(Pending(report, now))
             }
         }
         schedulePump()
-    }
-
-    /** True once the host has turned on keyboard notifications (i.e. it sees the keyboard). */
-    val keyboardReady: Boolean get() = kbSubscribed.isNotEmpty()
-
-    /** Queues keyboard reports (in order, none dropped). Returns false if the host is not listening for them. */
-    fun typeReports(reports: List<ByteArray>): Boolean {
-        if (!running || kbSubscribed.isEmpty()) return false
-        val now = SystemClock.elapsedRealtimeNanos()
-        synchronized(queue) { for (r in reports) queue.addLast(Pending(r, now, KIND_KEYBOARD)) }
-        schedulePump()
-        return true
     }
 
     private fun sameDigital(a: ByteArray, b: ByteArray): Boolean {
@@ -238,6 +214,7 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
     /** Runs on the sender thread only: sends the next queued report once the previous one has left the phone. */
     private fun pump() {
         val srv = server ?: return
+        val chr = inputReport ?: return
         val item: Pending
         synchronized(queue) {
             if (queue.isEmpty()) return
@@ -249,15 +226,8 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
             notifyBusy = true
             notifyStartedAt = now
             inFlightQueuedNs = item.queuedAtNs
-            inFlightKind = item.kind
         }
-        val typing = item.kind == KIND_KEYBOARD
-        val chr = if (typing) keyboardReport else inputReport
-        if (chr == null) {
-            synchronized(queue) { notifyBusy = false }
-            return
-        }
-        val targets = if (typing) kbSubscribed.values else subscribed.values
+        val targets = subscribed.values
         if (targets.isEmpty()) {
             synchronized(queue) { notifyBusy = false; queue.clear() }
             return
@@ -360,7 +330,7 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
         )
         hid.addCharacteristic(
             BluetoothGattCharacteristic(UUID_REPORT_MAP, PROPERTY_READ, PERMISSION_READ_ENCRYPTED).also {
-                it.value = HidReport.reportMap(keyboardEnabled)
+                it.value = HidReport.REPORT_MAP
             },
         )
         hid.addCharacteristic(
@@ -389,19 +359,6 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
         output.value = ByteArray(8)
         output.addDescriptor(reportReference(HidReport.OUTPUT_REPORT_ID, 2))
         hid.addCharacteristic(output)
-
-        if (keyboardEnabled) {
-            val keys = BluetoothGattCharacteristic(UUID_REPORT, PROPERTY_READ or PROPERTY_NOTIFY, PERMISSION_READ_ENCRYPTED)
-            keys.value = ByteArray(HidReport.KEYBOARD_REPORT_SIZE)
-            keys.addDescriptor(
-                BluetoothGattDescriptor(UUID_CCC, PERMISSION_READ_ENCRYPTED or PERMISSION_WRITE_ENCRYPTED).also {
-                    it.value = BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
-                },
-            )
-            keys.addDescriptor(reportReference(HidReport.KEYBOARD_REPORT_ID, 1))
-            hid.addCharacteristic(keys)
-            keyboardReport = keys
-        }
 
         pendingServices.add(dis)
         pendingServices.add(battery)
@@ -468,10 +425,7 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
         }
 
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
-            if (newState != BluetoothProfile.STATE_CONNECTED) {
-                subscribed.remove(device.address)
-                kbSubscribed.remove(device.address)
-            }
+            if (newState != BluetoothProfile.STATE_CONNECTED) subscribed.remove(device.address)
             main.post {
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
                     connected.add(device)
@@ -494,11 +448,7 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
         ) {
             val full = when (characteristic.uuid) {
                 UUID_PROTOCOL_MODE -> byteArrayOf(protocolMode)
-                UUID_REPORT -> when {
-                    characteristic === inputReport -> latest
-                    characteristic === keyboardReport -> ByteArray(HidReport.KEYBOARD_REPORT_SIZE)
-                    else -> ByteArray(8)
-                }
+                UUID_REPORT -> if (characteristic === inputReport) latest else ByteArray(8)
                 else -> characteristic.value ?: ByteArray(0)
             }
             respondRead(device, requestId, offset, full)
@@ -508,8 +458,7 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
             device: BluetoothDevice, requestId: Int, offset: Int, descriptor: BluetoothGattDescriptor,
         ) {
             val full = if (descriptor.uuid == UUID_CCC) {
-                val on = if (descriptor.characteristic === keyboardReport) kbSubscribed.containsKey(device.address) else subscribed.containsKey(device.address)
-                if (on) BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                if (subscribed.containsKey(device.address)) BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
                 else BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
             } else {
                 descriptor.value ?: ByteArray(0)
@@ -521,10 +470,7 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
             device: BluetoothDevice, requestId: Int, descriptor: BluetoothGattDescriptor,
             preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray,
         ) {
-            if (descriptor.uuid == UUID_CCC && descriptor.characteristic === keyboardReport && keyboardReport != null) {
-                val enabled = value.isNotEmpty() && (value[0].toInt() and 0x01) != 0
-                if (enabled) kbSubscribed[device.address] = device else kbSubscribed.remove(device.address)
-            } else if (descriptor.uuid == UUID_CCC && descriptor.characteristic === inputReport) {
+            if (descriptor.uuid == UUID_CCC && descriptor.characteristic === inputReport) {
                 val enabled = value.isNotEmpty() && (value[0].toInt() and 0x01) != 0
                 if (enabled) subscribed[device.address] = device else subscribed.remove(device.address)
                 if (enabled) {
@@ -554,7 +500,7 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
         ) {
             when {
                 characteristic.uuid == UUID_PROTOCOL_MODE && value.isNotEmpty() -> protocolMode = value[0]
-                characteristic.uuid == UUID_REPORT && characteristic !== inputReport && characteristic !== keyboardReport -> handleOutputReport(value)
+                characteristic.uuid == UUID_REPORT && characteristic !== inputReport -> handleOutputReport(value)
             }
             if (responseNeeded) server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
         }
@@ -563,15 +509,13 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
             val now = SystemClock.elapsedRealtimeNanos()
             synchronized(queue) {
                 notifyBusy = false
-                if (inFlightKind == KIND_GAMEPAD) {
-                    val latMs = (now - inFlightQueuedNs) / 1_000_000f
-                    latEmaMs = if (latEmaMs == 0f) latMs else latEmaMs + (latMs - latEmaMs) * 0.1f
-                    if (latMs > winMaxMs) winMaxMs = latMs
-                    winCount++
-                    if (now - winStartNs >= 1_000_000_000L) {
-                        lastRate = winCount; lastMax = winMaxMs
-                        winCount = 0; winMaxMs = 0f; winStartNs = now
-                    }
+                val latMs = (now - inFlightQueuedNs) / 1_000_000f
+                latEmaMs = if (latEmaMs == 0f) latMs else latEmaMs + (latMs - latEmaMs) * 0.1f
+                if (latMs > winMaxMs) winMaxMs = latMs
+                winCount++
+                if (now - winStartNs >= 1_000_000_000L) {
+                    lastRate = winCount; lastMax = winMaxMs
+                    winCount = 0; winMaxMs = 0f; winStartNs = now
                 }
             }
             schedulePump()
@@ -596,8 +540,6 @@ class BleHidGamepad(context: Context, private val listener: Listener) {
     }
 
     companion object {
-        private const val KIND_GAMEPAD = 0
-        private const val KIND_KEYBOARD = 1
         private const val MAX_QUEUE = 8
         private const val DIGITAL_START = 8 // bytes 8.. of the input report: triggers, hat, buttons, share
         private const val BUSY_TIMEOUT_MS = 100L

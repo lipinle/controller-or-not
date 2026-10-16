@@ -27,18 +27,6 @@ class SettingsStore(context: Context) {
         get() = prefs.getFloat("bg_dim", 0.35f)
         set(v) { prefs.edit().putFloat("bg_dim", v).apply() }
 
-    var keyboardEnabled: Boolean
-        get() = prefs.getBoolean("keyboard", false)
-        set(v) { prefs.edit().putBoolean("keyboard", v).apply() }
-
-    var kbThai: Boolean
-        get() = prefs.getBoolean("kb_thai", false)
-        set(v) { prefs.edit().putBoolean("kb_thai", v).apply() }
-
-    var kbEnter: Boolean
-        get() = prefs.getBoolean("kb_enter", true)
-        set(v) { prefs.edit().putBoolean("kb_enter", v).apply() }
-
     // --- named layout presets (name -> layout JSON) ---
 
     private fun presetObject(): JSONObject = try {

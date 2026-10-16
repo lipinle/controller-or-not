@@ -31,7 +31,7 @@ object Presets {
             val list = ArrayList<ControlSpec>()
             list.add(ControlSpec("dyn_l", Kind.DYN_STICK_L, Shape.RECT, 1.4f, g.l(5.2f), g.t(6.2f), zoneW = 9f, zoneH = 7f))
             list.add(ControlSpec("look", Kind.TOUCH_STRIP, Shape.RECT, 1f, g.r(6.6f), g.t(5.4f), zoneW = 10.5f, zoneH = 7.5f))
-            list.addAll(keep(base, "lt", "lb", "rt", "rb", "view", "guide", "menu", "kbd"))
+            list.addAll(keep(base, "lt", "lb", "rt", "rb", "view", "guide", "menu"))
             list.addAll(face(g, 2.8f, 7.3f, 0.8f, 1.2f, "f_"))
             list
         },
@@ -40,7 +40,7 @@ object Presets {
             val g = Grid(w, h)
             val base = Layout.defaults(w, h)
             val list = ArrayList<ControlSpec>()
-            list.addAll(keep(base, "stick_l", "lt", "lb", "rt", "rb", "view", "guide", "menu", "kbd"))
+            list.addAll(keep(base, "stick_l", "lt", "lb", "rt", "rb", "view", "guide", "menu"))
             list.addAll(face(g, 2.8f, 5.6f, 0.85f, 1.25f, "f_"))
             list.add(ControlSpec("gyro", Kind.GYRO_BTN, Shape.PILL, 1.0f, g.r(7.4f), g.t(8.4f), aspect = 0.55f))
             list.add(ControlSpec("dpad", Kind.DPAD, Shape.CIRCLE, 1.75f, g.l(6.0f), g.t(7.7f)))

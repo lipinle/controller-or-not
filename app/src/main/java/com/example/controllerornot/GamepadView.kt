@@ -31,7 +31,6 @@ class GamepadView(context: Context) : View(context) {
     var onEdit: ((ControlSpec) -> Unit)? = null
     var onLayoutChanged: (() -> Unit)? = null
     var onGyroButton: ((Boolean) -> Unit)? = null
-    var onKeyboardButton: (() -> Unit)? = null
 
     var opacity = 0.95f
         set(v) { field = v.coerceIn(0.2f, 1f); invalidate() }
@@ -66,7 +65,6 @@ class GamepadView(context: Context) : View(context) {
     private var last: GamepadState? = null
     private var prevPressed: Set<ControlSpec> = emptySet()
     private var lastGyroHeld = false
-    private var lastKbDown = false
     private var gyroX = 0f
     private var gyroY = 0f
     private var gyroRight = true
@@ -133,14 +131,6 @@ class GamepadView(context: Context) : View(context) {
         releaseAll()
         onLayoutChanged?.invoke()
         emit()
-        invalidate()
-    }
-
-    /** Adds the keyboard button to the layout when it was removed (used when the keyboard feature is switched on). */
-    fun ensureKeyboardButton() {
-        if (specsList.any { it.kind == Kind.KEYBOARD_BTN }) return
-        specsList.add(Layout.keyboardButton(Layout.newId("kbd", specsList)))
-        onLayoutChanged?.invoke()
         invalidate()
     }
 
@@ -243,7 +233,6 @@ class GamepadView(context: Context) : View(context) {
             Kind.DYN_STICK_L, Kind.DYN_STICK_R -> drawDynamic(c, s)
             Kind.TOUCH_STRIP -> drawStrip(c, s)
             Kind.GYRO_BTN -> drawGyroButton(c, s)
-            Kind.KEYBOARD_BTN -> drawKeyboardButton(c, s)
         }
     }
 
@@ -291,12 +280,6 @@ class GamepadView(context: Context) : View(context) {
         val w = label.measureText(text)
         val size = if (w > maxWidth && w > 0f) baseSize * maxWidth / w else baseSize
         centeredText(c, text, x, y, max(size, u * 0.16f), color)
-    }
-
-    private fun drawKeyboardButton(c: Canvas, s: ControlSpec) {
-        val x = cx(s); val y = cy(s); val r = rad(s)
-        glassCircle(c, x, y, r, s.down, PRESS_WHITE)
-        fitText(c, s.labelOr("Aa"), x, y, r * 0.85f, r * 1.7f, if (s.down) DARK else 0xFFFFFFFF.toInt())
     }
 
     private fun drawButton(c: Canvas, s: ControlSpec) {
@@ -710,10 +693,6 @@ class GamepadView(context: Context) : View(context) {
         if (haptics && pressedNow.any { it !in prevPressed }) performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
         prevPressed = pressedNow
 
-        val kbDown = specsList.any { it.kind == Kind.KEYBOARD_BTN && it.down }
-        if (kbDown && !lastKbDown) onKeyboardButton?.invoke()
-        lastKbDown = kbDown
-
         val gyroHeld = specsList.any { it.kind == Kind.GYRO_BTN && it.down }
         if (gyroHeld != lastGyroHeld) {
             lastGyroHeld = gyroHeld
@@ -786,7 +765,6 @@ class GamepadView(context: Context) : View(context) {
     private fun releaseAll() {
         for (s in specsList) { s.down = false; s.dirMask = 0; releaseStick(s) }
         prevPressed = emptySet()
-        lastKbDown = false
         if (lastGyroHeld) { lastGyroHeld = false; onGyroButton?.invoke(false) }
     }
 
@@ -811,7 +789,7 @@ class GamepadView(context: Context) : View(context) {
                     if (s.dirMask and ControlSpec.DIR_DOWN != 0) down = true
                     if (s.dirMask and ControlSpec.DIR_LEFT != 0) left = true
                 }
-                Kind.GYRO_BTN, Kind.KEYBOARD_BTN -> Unit
+                Kind.GYRO_BTN -> Unit
                 Kind.BUTTON -> if (s.down) when (s.output) {
                     Output.NONE -> Unit
                     Output.LT -> lt = 1f

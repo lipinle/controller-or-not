@@ -23,7 +23,6 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
-import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -74,7 +73,6 @@ class MainActivity : Activity(), BleHidGamepad.Listener {
         pad.setLayoutJson(store.layoutJson)
         pad.onState = { gamepad.send(it) }
         pad.onEdit = { showControlEditor(it) }
-        pad.onKeyboardButton = { showKeyboard() }
         pad.onLayoutChanged = { store.layoutJson = pad.layoutJson() }
 
         gyro = GyroController(this, { x, y, right -> pad.setGyro(x, y, right) }, { pad.gyroActive = it })
@@ -251,13 +249,6 @@ class MainActivity : Activity(), BleHidGamepad.Listener {
             sheet.row("Gyroscope", if (gyro.config.enabled) "เปิด" else "ปิด", chevron = true) { sheet.dismiss(); showGyro() },
         )
 
-        sheet.section("แป้นพิมพ์")
-        sheet.card(
-            sheet.toggle("เปิดใช้งานแป้นพิมพ์บลูทูธ (ทดลอง)", store.keyboardEnabled) { setKeyboardEnabled(it) },
-            sheet.row("เปิดช่องพิมพ์ข้อความ", chevron = true) { sheet.dismiss(); showKeyboard() },
-        )
-        sheet.note("เปิดแล้วมือถือจะแสดงเป็นแป้นพิมพ์ด้วย ใช้พิมพ์ข้อความในเกม ต้องลืมอุปกรณ์บน iPad แล้วจับคู่ใหม่ทุกครั้งที่เปิด/ปิด")
-
         sheet.section("พื้นหลัง")
         val hasBg = pad.backgroundBitmap != null
         val bgRows = arrayListOf(
@@ -301,7 +292,6 @@ class MainActivity : Activity(), BleHidGamepad.Listener {
             Kind.DYN_STICK_R -> "Dynamic Joystick ขวา"
             Kind.TOUCH_STRIP -> "แถบสัมผัส"
             Kind.GYRO_BTN -> "ปุ่ม Gyro"
-            Kind.KEYBOARD_BTN -> "ปุ่มแป้นพิมพ์"
         }
         val sheet = IosSheet(this, title)
         sheet.onDismiss {
@@ -361,12 +351,11 @@ class MainActivity : Activity(), BleHidGamepad.Listener {
             sheet.note("ปุ่มนี้ใช้เปิด/ปิดหรือกดค้างเพื่อใช้ Gyro ตั้งโหมดได้ที่ ••• → Gyroscope")
         }
 
-        if (s.kind == Kind.BUTTON || s.kind == Kind.GYRO_BTN || s.kind == Kind.KEYBOARD_BTN || s.isZone) {
+        if (s.kind == Kind.BUTTON || s.kind == Kind.GYRO_BTN || s.isZone) {
             sheet.section("ชื่อที่แสดงบนปุ่ม")
             val defaultName = when (s.kind) {
                 Kind.BUTTON -> s.output.label
                 Kind.GYRO_BTN -> "GYRO"
-                Kind.KEYBOARD_BTN -> "Aa"
                 else -> ""
             }
             val hint = if (defaultName.isEmpty()) "ไม่มีชื่อ" else "ค่าเริ่มต้น: $defaultName"
@@ -398,76 +387,12 @@ class MainActivity : Activity(), BleHidGamepad.Listener {
         sheet.show()
     }
 
-    // --- keyboard ---------------------------------------------------------------------------------
-
     private fun startGamepad(profile: HidProfile = profiles[store.profileIndex.coerceIn(0, profiles.size - 1)]) {
-        gamepad.start(profile, store.keyboardEnabled)
+        gamepad.start(profile)
     }
 
     private fun toast(text: String, long: Boolean = false) =
         Toast.makeText(this, text, if (long) Toast.LENGTH_LONG else Toast.LENGTH_SHORT).show()
-
-    private fun setKeyboardEnabled(on: Boolean) {
-        store.keyboardEnabled = on
-        if (on) pad.ensureKeyboardButton()
-        if (gamepad.isRunning) startGamepad()
-        toast("ไปที่ตั้งค่า Bluetooth ของ iPad กด Forget อุปกรณ์นี้ แล้วจับคู่ใหม่", long = true)
-    }
-
-    private val specialKeys = listOf(
-        "Enter" to Keyboard.ENTER, "⌫" to Keyboard.BACKSPACE, "Del" to Keyboard.DELETE, "Esc" to Keyboard.ESC, "Tab" to Keyboard.TAB,
-        "Space" to Keyboard.SPACE, "←" to Keyboard.LEFT, "↑" to Keyboard.UP, "↓" to Keyboard.DOWN, "→" to Keyboard.RIGHT,
-    )
-
-    private fun showKeyboard() {
-        val sheet = IosSheet(this, "แป้นพิมพ์")
-        sheet.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-        sheet.onDismiss { hideSystemBars() }
-        sheet.headerButton("เสร็จ", left = false, bold = true) { sheet.dismiss() }
-
-        if (!store.keyboardEnabled) {
-            sheet.note("แป้นพิมพ์ทำให้มือถือเครื่องนี้แสดงเป็นคีย์บอร์ดบลูทูธด้วย จึงใช้พิมพ์ข้อความลงในเกมบน iPad ได้ ต้องจับคู่ iPad ใหม่หลังเปิดใช้งาน")
-            sheet.card(sheet.action("เปิดใช้งานแป้นพิมพ์", Ios.BLUE) { setKeyboardEnabled(true); sheet.dismiss() })
-            sheet.show()
-            return
-        }
-        if (gamepad.isRunning && !gamepad.keyboardReady) {
-            sheet.note("⚠︎ iPad ยังไม่ได้เชื่อมต่อแป้นพิมพ์ ให้ Forget อุปกรณ์บน iPad แล้วจับคู่ใหม่ (ถ้าเพิ่งเปิดใช้งาน)")
-        }
-
-        sheet.section("ข้อความ")
-        val field = sheet.editText("", "พิมพ์ข้อความที่นี่ (ใช้แป้นพิมพ์ของมือถือ)", 0, multiline = true) { }
-        sheet.card(field)
-        sheet.card(
-            sheet.action("ส่งข้อความไปที่ iPad", Ios.BLUE) { sendTyped(field) },
-            sheet.toggle("กด Enter ต่อท้าย", store.kbEnter) { store.kbEnter = it },
-            sheet.segmented("ภาษาของแป้นพิมพ์บน iPad", listOf("English", "ไทย (เกษมณี)"), if (store.kbThai) 1 else 0) { store.kbThai = it == 1 },
-        )
-        sheet.note("ต้องสลับภาษาบน iPad ให้ตรงกับที่เลือก ภาษาไทยต้องเป็นแป้นพิมพ์ไทยแบบเกษมณี ตัวอักษรที่พิมพ์ไม่ได้ (อีโมจิ ฯลฯ) จะถูกข้าม")
-
-        sheet.section("ปุ่มพิเศษ")
-        sheet.card(sheet.chipGrid(specialKeys.map { it.first }, -1, 5, momentary = true) { i -> sendKey(specialKeys[i].second) })
-
-        sheet.show()
-        field.post { field.requestFocus() }
-    }
-
-    private fun sendKey(code: Int) {
-        if (!gamepad.typeReports(Keyboard.tap(code))) toast("iPad ยังไม่ได้เชื่อมต่อแป้นพิมพ์")
-    }
-
-    private fun sendTyped(field: EditText) {
-        val text = field.text.toString() + if (store.kbEnter) "\n" else ""
-        val result = Keyboard.reports(text, store.kbThai)
-        when {
-            result.reports.isEmpty() -> toast("ไม่มีตัวอักษรที่พิมพ์ได้")
-            !gamepad.typeReports(result.reports) -> toast("iPad ยังไม่ได้เชื่อมต่อแป้นพิมพ์", long = true)
-            else -> {
-                field.setText("")
-                toast(if (result.skipped > 0) "ส่งแล้ว (ข้าม ${result.skipped} ตัวที่พิมพ์ไม่ได้)" else "ส่งแล้ว")
-            }
-        }
-    }
 
     // --- presets ----------------------------------------------------------------------------------
 

@@ -32,7 +32,6 @@ enum class Kind {
     DYN_STICK_L, DYN_STICK_R, // dynamic joystick: appears wherever you touch inside its zone
     TOUCH_STRIP,              // swipe area that emulates turning a stick
     GYRO_BTN,                 // hold / toggle button for the gyro emulation
-    KEYBOARD_BTN,             // opens the on-screen text entry that types on the host
 }
 
 enum class Shape { CIRCLE, PILL, RECT }
@@ -128,7 +127,6 @@ object Layout {
             pill("menu", 0.8f, 0.55f, cx + 1.8f * u / w, b(0.9f), Output.MENU),
             circle("l3", Kind.BUTTON, 0.55f, l(4.9f), t(3.1f), Output.LS),
             circle("r3", Kind.BUTTON, 0.55f, r(8.7f), t(6.2f), Output.RS),
-            keyboardButton("kbd").also { it.x = 0.5f - 4.6f * u / w; it.y = t(0.8f) },
         )
     }
 
@@ -166,10 +164,8 @@ object Layout {
             ControlSpec(id, Kind.TOUCH_STRIP, Shape.RECT, 1f, 0.75f, 0.5f, zoneW = 8f, zoneH = 3f)
         },
         PaletteItem("Gyro") { id -> ControlSpec(id, Kind.GYRO_BTN, Shape.PILL, 0.8f, 0.5f, 0.5f, aspect = 0.55f) },
-        PaletteItem("แป้นพิมพ์") { id -> keyboardButton(id) },
     )
 
-    fun keyboardButton(id: String) = ControlSpec(id, Kind.KEYBOARD_BTN, Shape.CIRCLE, 0.55f, 0.36f, 0.09f)
 
     /** A fresh id for a control created from the palette. */
     fun newId(prefix: String, existing: List<ControlSpec>): String {
